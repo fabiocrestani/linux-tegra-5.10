@@ -37,7 +37,7 @@
 #include <dt-bindings/misc/nvidia,nct1008.h>
 
 /* Register Addresses used in this module. */
-#define LOC_TEMP_RD                  0x00
+#define LOC_TEMP_HIGH_RD             0x00
 #define EXT_TEMP_HI_RD               0x01
 #define STATUS_RD                    0x02
 #define CONFIG_RD                    0x03
@@ -58,7 +58,7 @@
 #define OFFSET_QUARTER_WR            0x12
 #define EXT_TEMP_HI_LIMIT_LO_BYTE    0x13
 #define EXT_TEMP_LO_LIMIT_LO_BYTE    0x14
-/* NOT USED                          0x15 */
+#define LOC_TEMP_LOW_RD              0x15
 /* NOT USED                          0x16 */
 /* NOT USED                          0x17 */
 /* NOT USED                          0x18 */
@@ -232,49 +232,83 @@ static int nct1008_get_temp_common(int sensor, struct nct1008_data *data,
 	s16 temp_hi;
 	s16 temp_lo = 0;
 	long temp_milli = 0;
-	u8 value;
+	u8 value_low_byte;
+	u8 value_high_byte;
 	int ret;
 
 	if (!((sensor == EXT) || (sensor == LOC)))
 		return -1;
 
-	/* Read External Temp */
+	/* Read External Temperature sensor */
 	if (sensor == EXT) {
-		ret = nct1008_read_reg(data, EXT_TEMP_LO_RD);
-		if (ret < 0)
-			return -1;
-		else
-			value = ret;
 
-		temp_lo = (value >> 6);
-
+		// Remote temperature (high byte) 0x01
+		// For proper operation, read the high byte of the temperature result first.
+		// Read the low byte register in the next read command.
 		ret = nct1008_read_reg(data, EXT_TEMP_HI_RD);
 		if (ret < 0)
 			return -1;
 		else
-			value = ret;
+			value_high_byte = ret;
 
-		temp_hi = value_to_temperature(pdata->extended_range, value);
-		temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi) + temp_lo * 250;
-
-	} else if (sensor == LOC) {
-		ret = nct1008_read_reg(data, LOC_TEMP_RD);
+		// Remote temperature (low byte) 0x10
+		// The resolution of the LSB in this register is 0.0625 °C for TMP451
+		ret = nct1008_read_reg(data, EXT_TEMP_LO_RD);
 		if (ret < 0)
 			return -1;
 		else
-			value = ret;
-		temp_hi = value_to_temperature(pdata->extended_range, value);
+			value_low_byte = ret;
 
-		if (data->chip == MAX6649)
+		temp_hi = value_to_temperature(pdata->extended_range, value_high_byte);
+
+		// NCT1008: 6-bit shift (resolution of 0.25°C)
+		// TMP451:  4-bit shift (resolution of 0.0625°C)
+		if (data->chip == TMP451) {
+			temp_lo = (value_low_byte >> 4);
+			// Warning: Conversion error due to use of milicelsius resolution
+			temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi) + temp_lo * 62;
+		}
+		else {
+			temp_lo = (value_low_byte >> 6);
+			temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi) + temp_lo * 250;
+		}
+
+	/* Read Local Temperature sensor */
+	} else if (sensor == LOC) {
+		// Local temperature (high byte) 0x00
+		ret = nct1008_read_reg(data, LOC_TEMP_HIGH_RD);
+		if (ret < 0)
+			return -1;
+		else
+			value_high_byte = ret;
+		temp_hi = value_to_temperature(pdata->extended_range, value_high_byte);
+
+		// Local temperature (low byte) 0x15
+		if (data->chip == TMP451)
 		{
-			ret = nct1008_read_reg(data, MAX6649_LOC_TEMP_LO_RD);
-			if(ret < 0)
+			ret = nct1008_read_reg(data, LOC_TEMP_LOW_RD);
+			if (ret < 0)
 				return -1;
 			else
-				value = ret;
-			temp_lo = (value >> 6);
+				value_low_byte = ret;
+			temp_lo = (value_low_byte >> 4);
+			// Warning: Conversion error due to use of milicelsius resolution
+			temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi) + temp_lo * 62;
 		}
-		temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi) + temp_lo * 250;
+		else if (data->chip == MAX6649)
+		{
+			ret = nct1008_read_reg(data, MAX6649_LOC_TEMP_LO_RD);
+			if (ret < 0)
+				return -1;
+			else
+				value_low_byte = ret;
+			temp_lo = (value_low_byte >> 6);
+			temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi) + temp_lo * 250;
+		}
+		else {
+			temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi);
+		}
+
 	}
 
 	if (temp_milli > NCT1008_MAX_TEMP_MILLI)
@@ -292,49 +326,20 @@ static ssize_t nct1008_show_temp(struct device *dev,
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct nct1008_data *data = i2c_get_clientdata(client);
-	struct nct1008_platform_data *pdata = &data->plat_data;
-
-	s16 temp1 = 0;
-	s16 temp = 0;
-	u8 temp2 = 0;
-	int value = 0;
+	int temp_local = 0;
+	int ret = 0;
 
 	if (!dev || !buf || !attr)
 		return -EINVAL;
 
-	value = nct1008_read_reg(data, LOC_TEMP_RD);
-	if (value < 0)
+	ret = nct1008_get_temp_common(LOC, data, &temp_local);
+	if (ret < 0)
 		goto error;
 
-	temp1 = value_to_temperature(pdata->extended_range, value);
-	if(data->chip == MAX6649)
-	{
-		value = nct1008_read_reg(data, MAX6649_LOC_TEMP_LO_RD);
-		if(value < 0)
-			goto error;
-
-		temp2 = (value >> 6);
-		return snprintf(buf, MAX_STR_PRINT, "%d.%d\n",
-			temp1, temp2 * 25);
-	}
-
-	value = nct1008_read_reg(data, EXT_TEMP_LO_RD);
-	if (value < 0)
-		goto error;
-
-	temp2 = (value >> 6);
-	value = nct1008_read_reg(data, EXT_TEMP_HI_RD);
-	if (value < 0)
-		goto error;
-
-	temp = value_to_temperature(pdata->extended_range, value);
-
-	return snprintf(buf, MAX_STR_PRINT, "%d %d.%d\n",
-		temp1, temp, temp2 * 25);
+	return snprintf(buf, MAX_STR_PRINT, "%d\n", temp_local);
 
 error:
-	return snprintf(buf, MAX_STR_PRINT,
-		"Error read local/ext temperature\n");
+	return snprintf(buf, MAX_STR_PRINT, "Error read local temperature\n");
 }
 
 static ssize_t nct1008_show_temp_overheat(struct device *dev,
@@ -482,29 +487,18 @@ static ssize_t nct1008_show_ext_temp(struct device *dev,
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct nct1008_data *data = i2c_get_clientdata(client);
-	struct nct1008_platform_data *pdata = &data->plat_data;
-	s16 temp_value;
-	int val = 0;
-	int data_lo;
+	int temp_remote = 0;
+	int ret = 0;
 
 	if (!dev || !buf || !attr)
 		return -EINVAL;
 
-	/* When reading the full external temperature value, read the
-	 * LSB first. This causes the MSB to be locked (that is, the
-	 * ADC does not write to it) until it is read */
-	data_lo = nct1008_read_reg(data, EXT_TEMP_LO_RD);
-	if (data_lo < 0)
+	ret = nct1008_get_temp_common(EXT, data, &temp_remote);
+	if (ret < 0)
 		goto error;
 
-	val = nct1008_read_reg(data, EXT_TEMP_HI_RD);
-	if (val < 0)
-		goto error;
+	return snprintf(buf, MAX_STR_PRINT, "%d\n", temp_remote);
 
-	temp_value = value_to_temperature(pdata->extended_range, val);
-
-	return snprintf(buf, MAX_STR_PRINT, "%d.%d\n", temp_value,
-			(25 * (data_lo >> 6)));
 error:
 	return snprintf(buf, MAX_STR_PRINT, "Error read ext temperature\n");
 }
@@ -552,7 +546,7 @@ static ssize_t nct1008_show_regs(struct device *dev,
 	sz += pr_reg(nct, buf+sz, PAGE_SIZE-sz,
 		"Consecutive Alert   ", CONSECUTIVE_ALERT);
 	sz += pr_reg(nct, buf+sz, PAGE_SIZE-sz,
-		"Local Temp Value    ", LOC_TEMP_RD);
+		"Local Temp Value    ", LOC_TEMP_HIGH_RD);
 	sz += pr_reg(nct, buf+sz, PAGE_SIZE-sz,
 		"Local Temp Hi Limit ", LOC_TEMP_HI_LIMIT_RD);
 	sz += pr_reg(nct, buf+sz, PAGE_SIZE-sz,
