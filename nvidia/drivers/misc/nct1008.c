@@ -265,8 +265,7 @@ static int nct1008_get_temp_common(int sensor, struct nct1008_data *data,
 		// TMP451:  4-bit shift (resolution of 0.0625°C)
 		if (data->chip == TMP451) {
 			temp_lo = (value_low_byte >> 4);
-			// Warning: Conversion error due to use of milicelsius resolution
-			temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi) + temp_lo * 62;
+			temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi) + temp_lo * 625 / 10;
 		}
 		else {
 			temp_lo = (value_low_byte >> 6);
@@ -292,8 +291,7 @@ static int nct1008_get_temp_common(int sensor, struct nct1008_data *data,
 			else
 				value_low_byte = ret;
 			temp_lo = (value_low_byte >> 4);
-			// Warning: Conversion error due to use of milicelsius resolution
-			temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi) + temp_lo * 62;
+			temp_milli = CELSIUS_TO_MILLICELSIUS(temp_hi) + temp_lo * 625 / 10;
 		}
 		else if (data->chip == MAX6649)
 		{
